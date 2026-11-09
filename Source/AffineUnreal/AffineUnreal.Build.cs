@@ -8,9 +8,14 @@ public class AffineUnreal : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
+		// Yoga represents undefined dimensions with NaN and tests them via x != x.
+		// Unreal's default fast floating-point mode can optimize that test away.
+		FPSemantics = FPSemanticsMode.Precise;
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
+			// Export the existing C embedding interface to other Unreal modules.
+			PrivateDefinitions.Add("AFFINEUI_C_BUILD_DLL=1");
 			// Unreal owns the process entry point; do not emit Sokol's WinMain.
 			PrivateDefinitions.Add("SOKOL_NO_ENTRY=1");
 
@@ -22,6 +27,7 @@ public class AffineUnreal : ModuleRules
 			{
 				case "D3D11":
 					PublicDefinitions.Add("SOKOL_D3D11=1");
+					PrivateDefinitions.Add("AFFINEUI_BACKEND_D3D11=1");
 					PublicSystemLibraries.AddRange(new string[] { "d3d11.lib", "dxgi.lib" });
 					break;
 				case "GLCORE":
