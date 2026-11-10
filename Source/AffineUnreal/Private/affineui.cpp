@@ -392494,6 +392494,7 @@ struct DocumentImpl {
 
     std::uint32_t              document_id{1};
     std::vector<DomWeakSlot>   dom_weak_slots;
+    bool                       preserve_dom_weak_slots_on_remove{false};
 
     ~DocumentImpl() {
 #if !defined(AFFINEUI_STUB_BUILD)
@@ -413595,7 +413596,9 @@ DocumentImpl* document_impl_from_node(lxb_dom_node_t* node) {
 lxb_status_t affineui_dom_event_remove(lxb_dom_node_t* node) {
     auto* impl = document_impl_from_node(node);
     if (impl != nullptr) {
-        invalidate_dom_weak_slot(*impl, node);
+        if (!impl->preserve_dom_weak_slots_on_remove) {
+            invalidate_dom_weak_slot(*impl, node);
+        }
         if (impl->lexbor_ev_remove != nullptr) {
             return impl->lexbor_ev_remove(node);
         }
@@ -414255,6 +414258,131 @@ void Document::set_clipboard(ClipboardGet get, ClipboardSet set) {
 }
 
 Size Document::content_size() const { return impl_->content_size; }
+
+namespace detail { void parse_inline_style_attr(lxb_dom_element_t* e); }
+
+DomHandle Document::mount_root_handle(std::string_view elem_id) {
+    return weak_handle_for_id(elem_id);
+}
+
+DomHandle Document::create_node(DomNodeKind kind, std::string_view value) {
+    DomHandle out{};
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!impl_->doc) return out;
+    auto* document = lxb_dom_interface_document(impl_->doc);
+    lxb_dom_node_t* node = nullptr;
+    if (kind == DomNodeKind::Element && !value.empty() && value.size() <= 128) {
+        auto* e = lxb_dom_document_create_element(document,
+            reinterpret_cast<const lxb_char_t*>(value.data()), value.size(), nullptr);
+        if (e) node = lxb_dom_interface_node(e);
+    } else if (kind == DomNodeKind::Text) {
+        auto* n = lxb_dom_document_create_text_node(document,
+            reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+        if (n) node = lxb_dom_interface_node(n);
+    } else if (kind == DomNodeKind::Comment) {
+        auto* n = lxb_dom_document_create_comment(document,
+            reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+        if (n) node = lxb_dom_interface_node(n);
+    }
+    if (!node) return out;
+    std::size_t i = 0;
+    for (; i < impl_->dom_weak_slots.size(); ++i) {
+        if (impl_->dom_weak_slots[i].node == node) break;
+    }
+    if (i == impl_->dom_weak_slots.size()) {
+        for (i = 0; i < impl_->dom_weak_slots.size(); ++i)
+            if (!impl_->dom_weak_slots[i].node) break;
+        if (i == impl_->dom_weak_slots.size()) impl_->dom_weak_slots.push_back({});
+        impl_->dom_weak_slots[i].node = node;
+    }
+    auto& slot = impl_->dom_weak_slots[i];
+    if (!slot.generation) slot.generation = 1;
+    out = {impl_->document_id, static_cast<std::uint32_t>(i + 1), slot.generation};
+#else
+    (void)kind; (void)value;
+#endif
+    return out;
+}
+
+bool Document::insert_node(DomHandle ph, DomHandle nh, DomHandle bh) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    auto resolve = [this](DomHandle h) -> lxb_dom_node_t* {
+        return weak_handle_valid(h) ? impl_->dom_weak_slots[h.node_slot - 1].node : nullptr;
+    };
+    auto* parent = resolve(ph); auto* node = resolve(nh);
+    auto* before = bh ? resolve(bh) : nullptr;
+    if (!parent || !node || parent->type != LXB_DOM_NODE_TYPE_ELEMENT ||
+        (bh && (!before || before->parent != parent))) return false;
+    for (auto* p = parent; p; p = p->parent) if (p == node) return false;
+    if (node == before) return true;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    impl_->preserve_dom_weak_slots_on_remove = true;
+    if (node->parent) lxb_dom_node_remove(node);
+    if (before) lxb_dom_node_insert_before(before, node);
+    else lxb_dom_node_insert_child(parent, node);
+    impl_->preserve_dom_weak_slots_on_remove = false;
+    impl_->view_structure_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)ph; (void)nh; (void)bh; return false;
+#endif
+}
+
+bool Document::remove_node(DomHandle h) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h)) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || !node->parent) return false;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    lxb_dom_node_remove(node);
+    lxb_dom_node_destroy_deep(node);
+    impl_->view_structure_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)h; return false;
+#endif
+}
+
+bool Document::set_node_text(DomHandle h, std::string_view value) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h)) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || node->type != LXB_DOM_NODE_TYPE_TEXT) return false;
+    if (detail::node_text(node) == value) return true;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    lxb_dom_node_text_content_set(node,
+        reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+    impl_->view_structure_dirty = true;
+    impl_->paint_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)h; (void)value; return false;
+#endif
+}
+
+bool Document::set_node_attribute(DomHandle h, std::string_view name,
+                                  std::string_view value, bool remove) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h) || name.empty()) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || node->type != LXB_DOM_NODE_TYPE_ELEMENT) return false;
+    auto* e = lxb_dom_interface_element(node);
+    const bool fresh_style = !remove && name == "style" &&
+        lxb_dom_element_attr_by_id(e, LXB_DOM_ATTR_STYLE) == nullptr;
+    if (remove) (void)detail::remove_attribute_on_element(*impl_, e, name);
+    else (void)detail::set_attribute_on_element(*impl_, e, name, value);
+    if (fresh_style) detail::parse_inline_style_attr(e);
+    return true;
+#else
+    (void)h; (void)name; (void)value; (void)remove; return false;
+#endif
+}
 
 DomHandle Document::weak_handle_for_id(std::string_view elem_id) {
     DomHandle out{};
@@ -440539,6 +440667,42 @@ bool Ui::set_text(std::string_view elem_id, std::string_view text) {
     return changed;
 }
 
+DomHandle Ui::mount_root(std::string_view elem_id) {
+    return impl_->document.mount_root_handle(elem_id);
+}
+
+DomHandle Ui::create_node(DomNodeKind kind, std::string_view value) {
+    return impl_->document.create_node(kind, value);
+}
+
+bool Ui::insert_node(DomHandle parent, DomHandle node, DomHandle before) {
+    const bool changed = impl_->document.insert_node(parent, node, before);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::remove_node(DomHandle node) {
+    const bool changed = impl_->document.remove_node(node);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::set_node_text(DomHandle node, std::string_view value) {
+    const bool changed = impl_->document.set_node_text(node, value);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::set_node_attribute(DomHandle node, std::string_view name,
+                            std::string_view value, bool remove) {
+    const bool changed = impl_->document.set_node_attribute(node, name, value, remove);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+void Ui::begin_node_mutations() { (void)impl_->document.begin_view_mutations(); }
+void Ui::end_node_mutations() { impl_->document.end_view_mutations(); mark_dirty(); }
+
 std::vector<Rect> Ui::take_dirty_rects() {
     return impl_->document.take_dirty_rects();
 }
@@ -447648,6 +447812,62 @@ int affineui_ui_set_text(affineui_ui* ui, const char* elem_id, const char* text)
                                                          affineui_c::sv(text))
                ? 1
                : 0;
+}
+
+affineui_dom_handle affineui_ui_mount_root(affineui_ui* ui, const char* elem_id) {
+    if (!ui || !elem_id) return {};
+    const auto h = reinterpret_cast<affineui::Ui*>(ui)->mount_root(elem_id);
+    return {h.document_id, h.node_slot, h.generation};
+}
+affineui_dom_handle affineui_ui_create_node(affineui_ui* ui,
+                                             affineui_dom_node_kind kind,
+                                             const char* value) {
+    if (!ui || !value) return {};
+    affineui::DomNodeKind cpp_kind;
+    switch (kind) {
+        case AFFINEUI_DOM_ELEMENT: cpp_kind = affineui::DomNodeKind::Element; break;
+        case AFFINEUI_DOM_TEXT: cpp_kind = affineui::DomNodeKind::Text; break;
+        case AFFINEUI_DOM_COMMENT: cpp_kind = affineui::DomNodeKind::Comment; break;
+        default: return {};
+    }
+    const auto h = reinterpret_cast<affineui::Ui*>(ui)->create_node(cpp_kind, std::string_view{value});
+    return {h.document_id, h.node_slot, h.generation};
+}
+int affineui_ui_insert_node(affineui_ui* ui, affineui_dom_handle parent,
+                            affineui_dom_handle node, affineui_dom_handle before) {
+    return ui && reinterpret_cast<affineui::Ui*>(ui)->insert_node(
+        {parent.document_id, parent.node_slot, parent.generation},
+        {node.document_id, node.node_slot, node.generation},
+        {before.document_id, before.node_slot, before.generation}) ? 1 : 0;
+}
+int affineui_ui_remove_node(affineui_ui* ui, affineui_dom_handle node) {
+    return ui && reinterpret_cast<affineui::Ui*>(ui)->remove_node(
+        {node.document_id, node.node_slot, node.generation}) ? 1 : 0;
+}
+int affineui_ui_node_set_text(affineui_ui* ui, affineui_dom_handle node,
+                              const char* text) {
+    return ui && text && reinterpret_cast<affineui::Ui*>(ui)->set_node_text(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{text}) ? 1 : 0;
+}
+int affineui_ui_node_set_attr(affineui_ui* ui, affineui_dom_handle node,
+                              const char* name, const char* value) {
+    return ui && name && value && reinterpret_cast<affineui::Ui*>(ui)->set_node_attribute(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{name}, std::string_view{value}) ? 1 : 0;
+}
+int affineui_ui_node_remove_attr(affineui_ui* ui, affineui_dom_handle node,
+                                 const char* name) {
+    return ui && name && reinterpret_cast<affineui::Ui*>(ui)->set_node_attribute(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{name}, {}, true) ? 1 : 0;
+}
+int affineui_ui_node_valid(const affineui_ui* ui, affineui_dom_handle node) {
+    return ui && reinterpret_cast<const affineui::Ui*>(ui)->document().weak_handle_valid(
+        {node.document_id, node.node_slot, node.generation}) ? 1 : 0;
+}
+void affineui_ui_begin_node_mutations(affineui_ui* ui) {
+    if (ui) reinterpret_cast<affineui::Ui*>(ui)->begin_node_mutations();
+}
+void affineui_ui_end_node_mutations(affineui_ui* ui) {
+    if (ui) reinterpret_cast<affineui::Ui*>(ui)->end_node_mutations();
 }
 
 void affineui_ui_content_size(const affineui_ui* ui, int* out_w, int* out_h) {
