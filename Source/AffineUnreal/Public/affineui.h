@@ -121,7 +121,7 @@ struct DomHandle {
     }
 };
 
-enum class DomNodeKind : std::uint8_t { Element, Text, Comment };
+enum class DomNodeKind : std::uint8_t { Element, Text, Comment, SvgElement };
 
 enum class MouseButton : std::uint8_t { Left, Right, Middle };
 
@@ -3655,6 +3655,10 @@ public:
     AFFINEUI_WEAK_TRACKABLE()
 
 private:
+    friend class Ui;
+    bool advance_keyboard_focus(bool backwards);
+    bool clear_keyboard_focus();
+    HoverInfo focused_button_info() const;
     DispatchResult dispatch_impl(const Event& ev, Painter* measurer);
 
     struct TransientState {
@@ -8269,7 +8273,8 @@ typedef struct affineui_dom_handle {
 typedef enum affineui_dom_node_kind {
     AFFINEUI_DOM_ELEMENT = 0,
     AFFINEUI_DOM_TEXT = 1,
-    AFFINEUI_DOM_COMMENT = 2
+    AFFINEUI_DOM_COMMENT = 2,
+    AFFINEUI_DOM_SVG_ELEMENT = 3
 } affineui_dom_node_kind;
 
 // Concrete GPU backend. Must match the backend AffineUI was compiled for.
@@ -8318,6 +8323,17 @@ typedef enum affineui_log_level {
 } affineui_log_level;
 
 typedef void (*affineui_log_fn)(affineui_log_level level, const char* msg, void* user);
+
+typedef struct affineui_resource_blob {
+    const void* data;
+    size_t size;
+    void (*release)(void* user);
+    void* user;
+} affineui_resource_blob;
+
+// A successful load lends bytes until release is called.
+typedef int (*affineui_resource_loader_fn)(void* user, const char* path,
+                                           affineui_resource_blob* out);
 
 typedef struct affineui_init_desc {
     const affineui_gpu_context* gpu;   // non-null + complete = embedded mode
@@ -8454,6 +8470,9 @@ AFFINEUI_C_API void         affineui_ui_destroy(affineui_ui* ui);
 
 // Initialize for embedded mode against host graphics objects.
 AFFINEUI_C_API void affineui_ui_init(affineui_ui* ui, const affineui_init_desc* desc);
+AFFINEUI_C_API void affineui_ui_set_resource_loader(affineui_ui* ui,
+                                                   affineui_resource_loader_fn load,
+                                                   void* user);
 
 // ── Content ──────────────────────────────────────────────────────────
 AFFINEUI_C_API void affineui_ui_set_html(affineui_ui* ui, const char* html);
