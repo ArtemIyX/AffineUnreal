@@ -121,6 +121,8 @@ struct DomHandle {
     }
 };
 
+enum class DomNodeKind : std::uint8_t { Element, Text, Comment, SvgElement };
+
 enum class MouseButton : std::uint8_t { Left, Right, Middle };
 
 /// Platform-independent key code carried by KeyDown / KeyUp events.
@@ -3538,7 +3540,13 @@ public:
     /// when Lexbor removes/destroys the referenced node.
     [[nodiscard]] DomHandle weak_handle_for_id(std::string_view elem_id);
     [[nodiscard]] bool weak_handle_valid(DomHandle handle) const;
-
+    [[nodiscard]] DomHandle mount_root_handle(std::string_view elem_id);
+    [[nodiscard]] DomHandle create_node(DomNodeKind kind, std::string_view value);
+    bool insert_node(DomHandle parent, DomHandle node, DomHandle before = {});
+    bool remove_node(DomHandle node);
+    bool set_node_text(DomHandle node, std::string_view value);
+    bool set_node_attribute(DomHandle node, std::string_view name,
+                            std::string_view value, bool remove = false);
     /// Set the document animation clock to a deterministic elapsed time.
     /// Intended for conformance/test harnesses that compare exact animation
     /// phases against a browser.
@@ -3647,6 +3655,10 @@ public:
     AFFINEUI_WEAK_TRACKABLE()
 
 private:
+    friend class Ui;
+    bool advance_keyboard_focus(bool backwards);
+    bool clear_keyboard_focus();
+    HoverInfo focused_button_info() const;
     DispatchResult dispatch_impl(const Event& ev, Painter* measurer);
 
     struct TransientState {
@@ -7384,6 +7396,15 @@ public:
                   std::string_view value);
     bool remove_attr(std::string_view elem_id, std::string_view name);
     bool set_text(std::string_view elem_id, std::string_view text);
+    [[nodiscard]] DomHandle mount_root(std::string_view elem_id);
+    [[nodiscard]] DomHandle create_node(DomNodeKind kind, std::string_view value);
+    bool insert_node(DomHandle parent, DomHandle node, DomHandle before = {});
+    bool remove_node(DomHandle node);
+    bool set_node_text(DomHandle node, std::string_view value);
+    bool set_node_attribute(DomHandle node, std::string_view name,
+                            std::string_view value, bool remove = false);
+    void begin_node_mutations();
+    void end_node_mutations();
 
     /// Drain dirty document rectangles reported by live mutations.
     std::vector<Rect> take_dirty_rects();
@@ -8244,6 +8265,17 @@ extern "C" {
 
 // Opaque handle to an affineui::Ui instance.
 typedef struct affineui_ui affineui_ui;
+typedef struct affineui_dom_handle {
+    uint32_t document_id;
+    uint32_t node_slot;
+    uint32_t generation;
+} affineui_dom_handle;
+typedef enum affineui_dom_node_kind {
+    AFFINEUI_DOM_ELEMENT = 0,
+    AFFINEUI_DOM_TEXT = 1,
+    AFFINEUI_DOM_COMMENT = 2,
+    AFFINEUI_DOM_SVG_ELEMENT = 3
+} affineui_dom_node_kind;
 
 // Concrete GPU backend. Must match the backend AffineUI was compiled for.
 // (Named to avoid colliding with the AFFINEUI_BACKEND_* compile macros.)
@@ -8291,6 +8323,17 @@ typedef enum affineui_log_level {
 } affineui_log_level;
 
 typedef void (*affineui_log_fn)(affineui_log_level level, const char* msg, void* user);
+
+typedef struct affineui_resource_blob {
+    const void* data;
+    size_t size;
+    void (*release)(void* user);
+    void* user;
+} affineui_resource_blob;
+
+// A successful load lends bytes until release is called.
+typedef int (*affineui_resource_loader_fn)(void* user, const char* path,
+                                           affineui_resource_blob* out);
 
 typedef struct affineui_init_desc {
     const affineui_gpu_context* gpu;   // non-null + complete = embedded mode
@@ -8427,6 +8470,9 @@ AFFINEUI_C_API void         affineui_ui_destroy(affineui_ui* ui);
 
 // Initialize for embedded mode against host graphics objects.
 AFFINEUI_C_API void affineui_ui_init(affineui_ui* ui, const affineui_init_desc* desc);
+AFFINEUI_C_API void affineui_ui_set_resource_loader(affineui_ui* ui,
+                                                   affineui_resource_loader_fn load,
+                                                   void* user);
 
 // ── Content ──────────────────────────────────────────────────────────
 AFFINEUI_C_API void affineui_ui_set_html(affineui_ui* ui, const char* html);
@@ -8490,6 +8536,16 @@ AFFINEUI_C_API int affineui_ui_remove_attr(affineui_ui* ui, const char* elem_id,
                                            const char* name);
 AFFINEUI_C_API int affineui_ui_set_text(affineui_ui* ui, const char* elem_id,
                                         const char* text);
+AFFINEUI_C_API affineui_dom_handle affineui_ui_mount_root(affineui_ui* ui, const char* elem_id);
+AFFINEUI_C_API affineui_dom_handle affineui_ui_create_node(affineui_ui* ui, affineui_dom_node_kind kind, const char* value);
+AFFINEUI_C_API int affineui_ui_insert_node(affineui_ui* ui, affineui_dom_handle parent, affineui_dom_handle node, affineui_dom_handle before);
+AFFINEUI_C_API int affineui_ui_remove_node(affineui_ui* ui, affineui_dom_handle node);
+AFFINEUI_C_API int affineui_ui_node_set_text(affineui_ui* ui, affineui_dom_handle node, const char* text);
+AFFINEUI_C_API int affineui_ui_node_set_attr(affineui_ui* ui, affineui_dom_handle node, const char* name, const char* value);
+AFFINEUI_C_API int affineui_ui_node_remove_attr(affineui_ui* ui, affineui_dom_handle node, const char* name);
+AFFINEUI_C_API int affineui_ui_node_valid(const affineui_ui* ui, affineui_dom_handle node);
+AFFINEUI_C_API void affineui_ui_begin_node_mutations(affineui_ui* ui);
+AFFINEUI_C_API void affineui_ui_end_node_mutations(affineui_ui* ui);
 
 // Document content size after the last layout pass.
 AFFINEUI_C_API void affineui_ui_content_size(const affineui_ui* ui,

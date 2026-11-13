@@ -41382,35 +41382,21 @@ bool
 lxb_css_property_state_font_family(lxb_css_parser_t *parser,
                                    const lxb_css_syntax_token_t *token, void *ctx)
 {
-    size_t length;
-    const lxb_char_t *data;
-    lexbor_str_t *str;
-    lexbor_mraw_t *mraw;
-    lxb_css_value_type_t type;
     lxb_css_rule_declaration_t *declar = (lxb_css_rule_declaration_t *) (ctx);
-    lxb_css_property_font_family_t *ff;
-    lxb_css_property_family_name_t *name;
+    lxb_css_property_font_family_t *ff = declar->u.font_family;
+    lexbor_mraw_t *mraw = parser->memory->mraw;
 
-    mraw = parser->memory->mraw;
-    ff = declar->u.font_family;
+    while (true) {
+        lxb_css_property_state_check_token(parser, token);
+        const bool unquoted = token->type == LXB_CSS_SYNTAX_TOKEN_IDENT;
+        const lxb_char_t *data;
+        size_t length;
+        lxb_css_value_type_t type = LXB_CSS_VALUE__UNDEF;
 
-    while (token != NULL) {
-        name = lexbor_mraw_alloc(mraw, sizeof(lxb_css_property_family_name_t));
-        if (name == NULL) {
-            return lxb_css_parser_memory_fail(parser);
-        }
-
-        if (token->type == LXB_CSS_SYNTAX_TOKEN_IDENT) {
+        if (unquoted) {
             data = lxb_css_syntax_token_ident(token)->data;
             length = lxb_css_syntax_token_ident(token)->length;
-
             type = lxb_css_value_by_name(data, length);
-            if (type != LXB_CSS_VALUE__UNDEF) {
-                name->generic = true;
-                name->u.type = type;
-
-                goto next;
-            }
         }
         else if (token->type == LXB_CSS_SYNTAX_TOKEN_STRING) {
             data = lxb_css_syntax_token_string(token)->data;
@@ -41420,21 +41406,18 @@ lxb_css_property_state_font_family(lxb_css_parser_t *parser,
             return lxb_css_parser_failed(parser);
         }
 
-        name->generic = false;
-
-        str = &name->u.str;
-
-        (void) lexbor_str_init(str, mraw, length);
-        if (name->u.str.data == NULL) {
+        lxb_css_property_family_name_t *name =
+            lexbor_mraw_alloc(mraw, sizeof(lxb_css_property_family_name_t));
+        if (name == NULL) {
             return lxb_css_parser_memory_fail(parser);
         }
 
-        memcpy(str->data, data, length);
-
-        str->data[length] = '\0';
-        str->length = length;
-
-    next:
+        name->generic = false;
+        lexbor_str_t *str = &name->u.str;
+        if (lexbor_str_init_append(str, mraw, data, length) == NULL) {
+            lexbor_mraw_free(mraw, name);
+            return lxb_css_parser_memory_fail(parser);
+        }
 
         if (ff->first == NULL) {
             ff->first = name;
@@ -41442,7 +41425,6 @@ lxb_css_property_state_font_family(lxb_css_parser_t *parser,
         else {
             ff->last->next = name;
         }
-
         name->next = NULL;
         name->prev = ff->last;
         ff->last = name;
@@ -41451,21 +41433,38 @@ lxb_css_property_state_font_family(lxb_css_parser_t *parser,
         token = lxb_css_syntax_parser_token_wo_ws(parser);
         lxb_css_property_state_check_token(parser, token);
 
-        if (token->type != LXB_CSS_SYNTAX_TOKEN_COMMA) {
-            if (token->type == LXB_CSS_SYNTAX_TOKEN__END) {
-                return lxb_css_parser_success(parser);
+        /* Consecutive identifiers form a single unquoted family name. */
+        while (unquoted && token->type == LXB_CSS_SYNTAX_TOKEN_IDENT) {
+            type = LXB_CSS_VALUE__UNDEF;
+            data = lxb_css_syntax_token_ident(token)->data;
+            length = lxb_css_syntax_token_ident(token)->length;
+            if (lexbor_str_append_one(str, mraw, ' ') == NULL
+                || lexbor_str_append(str, mraw, data, length) == NULL)
+            {
+                return lxb_css_parser_memory_fail(parser);
             }
 
-            return lxb_css_parser_memory_fail(parser);
+            lxb_css_syntax_parser_consume(parser);
+            token = lxb_css_syntax_parser_token_wo_ws(parser);
+            lxb_css_property_state_check_token(parser, token);
+        }
+
+        if (type != LXB_CSS_VALUE__UNDEF) {
+            lexbor_str_destroy(str, mraw, false);
+            name->generic = true;
+            name->u.type = type;
+        }
+
+        if (token->type == LXB_CSS_SYNTAX_TOKEN__END) {
+            return lxb_css_parser_success(parser);
+        }
+        if (token->type != LXB_CSS_SYNTAX_TOKEN_COMMA) {
+            return lxb_css_parser_failed(parser);
         }
 
         lxb_css_syntax_parser_consume(parser);
         token = lxb_css_syntax_parser_token_wo_ws(parser);
     }
-
-    lxb_css_property_state_check_token(parser, token);
-
-    return lxb_css_parser_success(parser);
 }
 
 bool
@@ -392494,6 +392493,7 @@ struct DocumentImpl {
 
     std::uint32_t              document_id{1};
     std::vector<DomWeakSlot>   dom_weak_slots;
+    bool                       preserve_dom_weak_slots_on_remove{false};
 
     ~DocumentImpl() {
 #if !defined(AFFINEUI_STUB_BUILD)
@@ -413595,7 +413595,9 @@ DocumentImpl* document_impl_from_node(lxb_dom_node_t* node) {
 lxb_status_t affineui_dom_event_remove(lxb_dom_node_t* node) {
     auto* impl = document_impl_from_node(node);
     if (impl != nullptr) {
-        invalidate_dom_weak_slot(*impl, node);
+        if (!impl->preserve_dom_weak_slots_on_remove) {
+            invalidate_dom_weak_slot(*impl, node);
+        }
         if (impl->lexbor_ev_remove != nullptr) {
             return impl->lexbor_ev_remove(node);
         }
@@ -414255,6 +414257,136 @@ void Document::set_clipboard(ClipboardGet get, ClipboardSet set) {
 }
 
 Size Document::content_size() const { return impl_->content_size; }
+
+namespace detail { void parse_inline_style_attr(lxb_dom_element_t* e); }
+
+DomHandle Document::mount_root_handle(std::string_view elem_id) {
+    return weak_handle_for_id(elem_id);
+}
+
+DomHandle Document::create_node(DomNodeKind kind, std::string_view value) {
+    DomHandle out{};
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!impl_->doc) return out;
+    auto* document = lxb_dom_interface_document(impl_->doc);
+    lxb_dom_node_t* node = nullptr;
+    if ((kind == DomNodeKind::Element || kind == DomNodeKind::SvgElement)
+        && !value.empty() && value.size() <= 128) {
+        const auto* tag = reinterpret_cast<const lxb_char_t*>(value.data());
+        auto* e = kind == DomNodeKind::Element
+            ? lxb_dom_document_create_element(document, tag, value.size(), nullptr)
+            : lxb_dom_element_create(document, tag, value.size(),
+                reinterpret_cast<const lxb_char_t*>("http://www.w3.org/2000/svg"),
+                sizeof("http://www.w3.org/2000/svg") - 1, nullptr, 0, nullptr, 0, false);
+        if (e) node = lxb_dom_interface_node(e);
+    } else if (kind == DomNodeKind::Text) {
+        auto* n = lxb_dom_document_create_text_node(document,
+            reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+        if (n) node = lxb_dom_interface_node(n);
+    } else if (kind == DomNodeKind::Comment) {
+        auto* n = lxb_dom_document_create_comment(document,
+            reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+        if (n) node = lxb_dom_interface_node(n);
+    }
+    if (!node) return out;
+    std::size_t i = 0;
+    for (; i < impl_->dom_weak_slots.size(); ++i) {
+        if (impl_->dom_weak_slots[i].node == node) break;
+    }
+    if (i == impl_->dom_weak_slots.size()) {
+        for (i = 0; i < impl_->dom_weak_slots.size(); ++i)
+            if (!impl_->dom_weak_slots[i].node) break;
+        if (i == impl_->dom_weak_slots.size()) impl_->dom_weak_slots.push_back({});
+        impl_->dom_weak_slots[i].node = node;
+    }
+    auto& slot = impl_->dom_weak_slots[i];
+    if (!slot.generation) slot.generation = 1;
+    out = {impl_->document_id, static_cast<std::uint32_t>(i + 1), slot.generation};
+#else
+    (void)kind; (void)value;
+#endif
+    return out;
+}
+
+bool Document::insert_node(DomHandle ph, DomHandle nh, DomHandle bh) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    auto resolve = [this](DomHandle h) -> lxb_dom_node_t* {
+        return weak_handle_valid(h) ? impl_->dom_weak_slots[h.node_slot - 1].node : nullptr;
+    };
+    auto* parent = resolve(ph); auto* node = resolve(nh);
+    auto* before = bh ? resolve(bh) : nullptr;
+    if (!parent || !node || parent->type != LXB_DOM_NODE_TYPE_ELEMENT ||
+        (bh && (!before || before->parent != parent))) return false;
+    for (auto* p = parent; p; p = p->parent) if (p == node) return false;
+    if (node == before) return true;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    impl_->preserve_dom_weak_slots_on_remove = true;
+    if (node->parent) lxb_dom_node_remove(node);
+    if (before) lxb_dom_node_insert_before(before, node);
+    else lxb_dom_node_insert_child(parent, node);
+    impl_->preserve_dom_weak_slots_on_remove = false;
+    impl_->view_structure_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)ph; (void)nh; (void)bh; return false;
+#endif
+}
+
+bool Document::remove_node(DomHandle h) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h)) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || !node->parent) return false;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    lxb_dom_node_remove(node);
+    lxb_dom_node_destroy_deep(node);
+    impl_->view_structure_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)h; return false;
+#endif
+}
+
+bool Document::set_node_text(DomHandle h, std::string_view value) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h)) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || node->type != LXB_DOM_NODE_TYPE_TEXT) return false;
+    if (detail::node_text(node) == value) return true;
+    const bool own_batch = !impl_->view_batch_active;
+    if (own_batch) begin_view_mutations();
+    lxb_dom_node_text_content_set(node,
+        reinterpret_cast<const lxb_char_t*>(value.data()), value.size());
+    impl_->view_structure_dirty = true;
+    impl_->paint_dirty = true;
+    if (own_batch) end_view_mutations();
+    return true;
+#else
+    (void)h; (void)value; return false;
+#endif
+}
+
+bool Document::set_node_attribute(DomHandle h, std::string_view name,
+                                  std::string_view value, bool remove) {
+#if !defined(AFFINEUI_STUB_BUILD)
+    if (!weak_handle_valid(h) || name.empty()) return false;
+    auto* node = impl_->dom_weak_slots[h.node_slot - 1].node;
+    if (!node || node->type != LXB_DOM_NODE_TYPE_ELEMENT) return false;
+    auto* e = lxb_dom_interface_element(node);
+    const bool fresh_style = !remove && name == "style" &&
+        lxb_dom_element_attr_by_id(e, LXB_DOM_ATTR_STYLE) == nullptr;
+    if (remove) (void)detail::remove_attribute_on_element(*impl_, e, name);
+    else (void)detail::set_attribute_on_element(*impl_, e, name, value);
+    if (fresh_style) detail::parse_inline_style_attr(e);
+    return true;
+#else
+    (void)h; (void)name; (void)value; (void)remove; return false;
+#endif
+}
 
 DomHandle Document::weak_handle_for_id(std::string_view elem_id) {
     DomHandle out{};
@@ -422930,6 +423062,38 @@ Document::HoverInfo Document::hovered_info() const {
     return info;
 }
 
+bool Document::advance_keyboard_focus(bool backwards) {
+    const int count = static_cast<int>(impl_->blocks.size());
+    const int step = backwards ? -1 : 1;
+    int next = impl_->focused_idx < 0 ? (backwards ? count - 1 : 0)
+                                      : impl_->focused_idx + step;
+    for (int checked = 0; checked < count; ++checked, next += step) {
+        if (next < 0) next = count - 1;
+        if (next == count) next = 0;
+        const auto& block = impl_->blocks[static_cast<std::size_t>(next)];
+        if (detail::focusable_ancestor(*impl_, next) == next &&
+            std::none_of(block.attrs.begin(), block.attrs.end(),
+                [](const auto& attr) { return attr.first == "disabled"; })) {
+            detail::set_focus(*impl_, next);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Document::clear_keyboard_focus() {
+    return detail::set_focus(*impl_, -1);
+}
+
+Document::HoverInfo Document::focused_button_info() const {
+    const int idx = impl_->focused_idx;
+    if (idx < 0 || idx >= static_cast<int>(impl_->blocks.size())) return {};
+    const auto& b = impl_->blocks[static_cast<std::size_t>(idx)];
+    if (b.tag != "button" || std::any_of(b.attrs.begin(), b.attrs.end(),
+        [](const auto& attr) { return attr.first == "disabled"; })) return {};
+    return {true, b.tag, b.elem_id, b.classes, b.attrs, b.bounds};
+}
+
 std::vector<Document::HoverInfo> Document::hovered_info_chain() const {
     std::vector<HoverInfo> chain;
     hovered_info_chain(chain);
@@ -427889,6 +428053,9 @@ void recollect_blocks_from_current_dom(detail::DocumentImpl& impl) {
         }
         if (bits & kActiveStateBit) {
             impl.active_chain.push_back(static_cast<int>(i));
+        }
+        if (bits & kFocusStateBit) {
+            impl.focused_idx = static_cast<int>(i);
         }
     }
     impl.paint_dirty = true;
@@ -440334,6 +440501,9 @@ struct UiImpl {
     // multiple handlers if multiple selectors match (mirrors DOM
     // event bubbling intuitively at the registration site).
     std::vector<std::pair<std::string, std::function<void()>>> click_handlers;
+    // Registered click selectors are eligible only when they matched the
+    // press target too; MouseUp alone must not synthesize a click.
+    std::vector<std::string> pressed_click_selectors;
     std::vector<Ui::EventHandler> event_capture_handlers;
     std::vector<Ui::EventHandler> event_handlers;
     std::vector<std::function<void(double)>> frame_callbacks;
@@ -440539,6 +440709,42 @@ bool Ui::set_text(std::string_view elem_id, std::string_view text) {
     return changed;
 }
 
+DomHandle Ui::mount_root(std::string_view elem_id) {
+    return impl_->document.mount_root_handle(elem_id);
+}
+
+DomHandle Ui::create_node(DomNodeKind kind, std::string_view value) {
+    return impl_->document.create_node(kind, value);
+}
+
+bool Ui::insert_node(DomHandle parent, DomHandle node, DomHandle before) {
+    const bool changed = impl_->document.insert_node(parent, node, before);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::remove_node(DomHandle node) {
+    const bool changed = impl_->document.remove_node(node);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::set_node_text(DomHandle node, std::string_view value) {
+    const bool changed = impl_->document.set_node_text(node, value);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+bool Ui::set_node_attribute(DomHandle node, std::string_view name,
+                            std::string_view value, bool remove) {
+    const bool changed = impl_->document.set_node_attribute(node, name, value, remove);
+    if (changed) mark_dirty();
+    return changed;
+}
+
+void Ui::begin_node_mutations() { (void)impl_->document.begin_view_mutations(); }
+void Ui::end_node_mutations() { impl_->document.end_view_mutations(); mark_dirty(); }
+
 std::vector<Rect> Ui::take_dirty_rects() {
     return impl_->document.take_dirty_rects();
 }
@@ -440605,23 +440811,52 @@ bool Ui::dispatch_impl(const Event& e, Painter* measurer) {
         if (consumed) return true;
     }
 
-    const auto result = measurer != nullptr
+    auto result = measurer != nullptr
                             ? impl->document.dispatch(e, *measurer)
                             : impl->renderer.dispatch(impl->document, e);
+    if (e.type == EventType::FocusLost) {
+        result.redraw_requested |= impl->document.clear_keyboard_focus();
+    }
+    if (!result.event_consumed && e.type == EventType::KeyDown && e.key == Key::Tab
+        && !e.ctrl && !e.alt && !e.super && impl->document.advance_keyboard_focus(e.shift)) {
+        result.event_consumed = true;
+        result.redraw_requested = true;
+    }
     if (result.redraw_requested || result.invalidate_view) {
         impl->dirty = true;  // a hover/focus/state change needs a repaint
     }
 
     const bool mouse_up_left =
         e.type == EventType::MouseUp && e.button == MouseButton::Left;
+    const bool mouse_down_left =
+        e.type == EventType::MouseDown && e.button == MouseButton::Left;
     const bool needs_chain =
-        !event_handlers.empty() || mouse_up_left;
+        !event_handlers.empty() || mouse_up_left || mouse_down_left;
     if (needs_chain) {
         impl->document.hovered_info_chain(impl->hover_chain_scratch);
     } else {
         impl->hover_chain_scratch.clear();
     }
     const auto& chain = impl->hover_chain_scratch;
+    if (mouse_down_left) {
+        impl->pressed_click_selectors.clear();
+        for (const auto& [selector, cb] : impl->click_handlers) {
+            (void)cb;
+            if (std::any_of(chain.begin(), chain.end(),
+                    [&](const Document::HoverInfo& info) {
+                        return matches_selector_list(selector, info);
+                    })) {
+                impl->pressed_click_selectors.push_back(selector);
+            }
+        }
+    }
+    std::vector<std::string> pressed_click_selectors;
+    if (e.type == EventType::MouseUp && e.button == MouseButton::Left) {
+        pressed_click_selectors = std::move(impl->pressed_click_selectors);
+        impl->pressed_click_selectors.clear();
+    } else if (e.type == EventType::FocusLost) {
+        impl->pressed_click_selectors.clear();
+    }
     bool event_consumed = result.event_consumed;
     if (!result.event_consumed) {
         for (const auto& cb : event_handlers) {
@@ -440633,6 +440868,22 @@ bool Ui::dispatch_impl(const Event& e, Painter* measurer) {
     // imm callbacks below must observe it (checkbox/button activation).
     if (event_consumed && !result.event_consumed) return true;
 
+    const bool keyboard_activate = !event_consumed && e.type == EventType::KeyUp
+        && (e.key == Key::Enter || e.key == Key::Space)
+        && !e.ctrl && !e.alt && !e.super;
+    if (keyboard_activate) {
+        const auto focused = impl->document.focused_button_info();
+        if (focused.valid) {
+            const auto click_handlers = impl->click_handlers;
+            for (const auto& [selector, cb] : click_handlers) {
+                if (matches_selector_list(selector, focused)) {
+                    cb();
+                    event_consumed = true;
+                }
+            }
+        }
+    }
+
     // Click routing: on MouseUp, check (1) user-registered selectors
     // via on_click across the hovered ancestor chain, then (2) imm-mode
     // handlers for elements stamped with `aui-imm-{hash}` ids. The
@@ -440643,6 +440894,11 @@ bool Ui::dispatch_impl(const Event& e, Painter* measurer) {
             std::vector<std::function<void()>> callbacks;
             const auto click_handlers = impl->click_handlers;
             for (const auto& [selector, cb] : click_handlers) {
+                if (std::find(pressed_click_selectors.begin(),
+                              pressed_click_selectors.end(), selector) ==
+                    pressed_click_selectors.end()) {
+                    continue;
+                }
                 const bool matched = std::any_of(
                     chain.begin(), chain.end(),
                     [&](const Document::HoverInfo& info) {
@@ -447478,8 +447734,28 @@ void affineui_ui_init(affineui_ui* ui, const affineui_init_desc* desc) {
     }
     if (desc->default_font_family) init.default_font_family = desc->default_font_family;
     if (desc->default_font_size > 0) init.default_font_size = desc->default_font_size;
-
     cpp.init(init);  // gpu/allocator point at locals; init() consumes them synchronously
+}
+
+void affineui_ui_set_resource_loader(affineui_ui* ui,
+                                    affineui_resource_loader_fn load, void* user) {
+    if (!ui) return;
+    affineui::ResourceLoader loader;
+    if (load) {
+        loader = [load, user](std::string_view path) {
+            const std::string filename(path);
+            affineui_resource_blob blob{};
+            const bool loaded = load(user, filename.c_str(), &blob) != 0;
+            const auto release = [](affineui_resource_blob* bytes) {
+                if (bytes->release) bytes->release(bytes->user);
+            };
+            const std::unique_ptr<affineui_resource_blob, decltype(release)> owner(&blob, release);
+            return loaded && blob.data && blob.size
+                ? std::string(static_cast<const char*>(blob.data), blob.size)
+                : std::string{};
+        };
+    }
+    reinterpret_cast<affineui::Ui*>(ui)->document().set_resource_loader(std::move(loader));
 }
 
 void affineui_ui_set_html(affineui_ui* ui, const char* html) {
@@ -447648,6 +447924,63 @@ int affineui_ui_set_text(affineui_ui* ui, const char* elem_id, const char* text)
                                                          affineui_c::sv(text))
                ? 1
                : 0;
+}
+
+affineui_dom_handle affineui_ui_mount_root(affineui_ui* ui, const char* elem_id) {
+    if (!ui || !elem_id) return {};
+    const auto h = reinterpret_cast<affineui::Ui*>(ui)->mount_root(elem_id);
+    return {h.document_id, h.node_slot, h.generation};
+}
+affineui_dom_handle affineui_ui_create_node(affineui_ui* ui,
+                                             affineui_dom_node_kind kind,
+                                             const char* value) {
+    if (!ui || !value) return {};
+    affineui::DomNodeKind cpp_kind;
+    switch (kind) {
+        case AFFINEUI_DOM_ELEMENT: cpp_kind = affineui::DomNodeKind::Element; break;
+        case AFFINEUI_DOM_TEXT: cpp_kind = affineui::DomNodeKind::Text; break;
+        case AFFINEUI_DOM_COMMENT: cpp_kind = affineui::DomNodeKind::Comment; break;
+        case AFFINEUI_DOM_SVG_ELEMENT: cpp_kind = affineui::DomNodeKind::SvgElement; break;
+        default: return {};
+    }
+    const auto h = reinterpret_cast<affineui::Ui*>(ui)->create_node(cpp_kind, std::string_view{value});
+    return {h.document_id, h.node_slot, h.generation};
+}
+int affineui_ui_insert_node(affineui_ui* ui, affineui_dom_handle parent,
+                            affineui_dom_handle node, affineui_dom_handle before) {
+    return ui && reinterpret_cast<affineui::Ui*>(ui)->insert_node(
+        {parent.document_id, parent.node_slot, parent.generation},
+        {node.document_id, node.node_slot, node.generation},
+        {before.document_id, before.node_slot, before.generation}) ? 1 : 0;
+}
+int affineui_ui_remove_node(affineui_ui* ui, affineui_dom_handle node) {
+    return ui && reinterpret_cast<affineui::Ui*>(ui)->remove_node(
+        {node.document_id, node.node_slot, node.generation}) ? 1 : 0;
+}
+int affineui_ui_node_set_text(affineui_ui* ui, affineui_dom_handle node,
+                              const char* text) {
+    return ui && text && reinterpret_cast<affineui::Ui*>(ui)->set_node_text(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{text}) ? 1 : 0;
+}
+int affineui_ui_node_set_attr(affineui_ui* ui, affineui_dom_handle node,
+                              const char* name, const char* value) {
+    return ui && name && value && reinterpret_cast<affineui::Ui*>(ui)->set_node_attribute(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{name}, std::string_view{value}) ? 1 : 0;
+}
+int affineui_ui_node_remove_attr(affineui_ui* ui, affineui_dom_handle node,
+                                 const char* name) {
+    return ui && name && reinterpret_cast<affineui::Ui*>(ui)->set_node_attribute(
+        {node.document_id, node.node_slot, node.generation}, std::string_view{name}, {}, true) ? 1 : 0;
+}
+int affineui_ui_node_valid(const affineui_ui* ui, affineui_dom_handle node) {
+    return ui && reinterpret_cast<const affineui::Ui*>(ui)->document().weak_handle_valid(
+        {node.document_id, node.node_slot, node.generation}) ? 1 : 0;
+}
+void affineui_ui_begin_node_mutations(affineui_ui* ui) {
+    if (ui) reinterpret_cast<affineui::Ui*>(ui)->begin_node_mutations();
+}
+void affineui_ui_end_node_mutations(affineui_ui* ui) {
+    if (ui) reinterpret_cast<affineui::Ui*>(ui)->end_node_mutations();
 }
 
 void affineui_ui_content_size(const affineui_ui* ui, int* out_w, int* out_h) {
