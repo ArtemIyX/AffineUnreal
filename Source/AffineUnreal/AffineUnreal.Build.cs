@@ -40,33 +40,36 @@ public class AffineUnreal : ModuleRules
 				case "D3D12":
 					throw new BuildException("AffineUI's bundled Sokol/NanoVG backend does not support D3D12.");
 				default:
-					throw new BuildException($"Unsupported AffineUI Sokol backend '{backend}'. Use D3D11, GLCORE, or DUMMY on Win64.");
+					throw new BuildException(
+						$"Unsupported AffineUI Sokol backend '{backend}'. Use D3D11, GLCORE, or DUMMY on Win64.");
 			}
 		}
 
 		PublicIncludePaths.AddRange(
-			new string[] {
+			new string[]
+			{
 				// ... add public include paths required here ...
 			}
-			);
-				
-		
+		);
+
+
 		PrivateIncludePaths.AddRange(
-			new string[] {
+			new string[]
+			{
 				// ... add other private include paths required here ...
 			}
-			);
-			
-		
+		);
+
+
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Core",
 				// ... add other public dependencies that you statically link with here ...
 			}
-			);
-			
-		
+		);
+
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -76,14 +79,14 @@ public class AffineUnreal : ModuleRules
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...	
 			}
-			);
-		
-		
+		);
+
+
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{
 				// ... add any modules that your module loads dynamically here ...
 			}
-			);
+		);
 	}
 }
