@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Resources/Icon128.png" alt="AffineUnreal logo" width="112" />
+  <img width="1280" height="640" alt="AffinePreview_low" src="https://github.com/user-attachments/assets/bd19d64d-1021-44f4-9db0-1fdfcd59d991" />
   <h1>AffineUnreal</h1>
   <p><strong>AffineUI, bundled for Unreal Engine.</strong></p>
   <p>Explore a native C++ HTML and CSS renderer inside an Unreal plugin.</p>
