@@ -73,6 +73,9 @@
 #include <set>
 #include <sstream>
 #include <cctype>
+#if defined(SOKOL_D3D11)
+#include <d3d11.h>
+#endif
 #include <cerrno>
 #include <charconv>
 #include <initializer_list>
@@ -388018,12 +388021,6 @@ struct NVGcontext;
 
 namespace affineui::detail {
 
-/// Construct a Painter that draws into the given NanoVG context.
-/// The painter holds a non-owning pointer to `vg`; the caller is
-/// responsible for creating it (via `nvgCreateGL3`) and destroying it
-/// (via `nvgDeleteGL3`) around the painter's lifetime.
-std::unique_ptr<Painter> make_nanovg_painter(NVGcontext* vg);
-
 /// Register a font with the painter's NanoVG context. Returns the
 /// internal font handle (suitable for `Painter::resolve_font` result)
 /// or 0 on failure.
@@ -414257,6 +414254,11 @@ void Document::set_clipboard(ClipboardGet get, ClipboardSet set) {
 }
 
 Size Document::content_size() const { return impl_->content_size; }
+
+void Document::invalidate_external_images() {
+    impl_->content_size = Size{0, 0};
+    impl_->paint_dirty = true;
+}
 
 namespace detail { void parse_inline_style_attr(lxb_dom_element_t* e); }
 
@@ -440666,6 +440668,32 @@ void Ui::render(const FrameTarget& target) {
     impl_->dirty = false;
 }
 
+bool Ui::register_external_image_d3d11(std::string_view url, void* texture, int width, int height) {
+    const bool Registered = impl_->renderer.register_external_image_d3d11(url, texture, width, height);
+    if (Registered) {
+        impl_->document.invalidate_external_images();
+        impl_->dirty = true;
+    }
+    return Registered;
+}
+
+bool Ui::unregister_external_image(std::string_view url) {
+    const bool Unregistered = impl_->renderer.unregister_external_image(url);
+    if (Unregistered) {
+        impl_->document.invalidate_external_images();
+        impl_->dirty = true;
+    }
+    return Unregistered;
+}
+
+bool Ui::destroy_retired_external_image(std::string_view url) {
+    return impl_->renderer.destroy_retired_external_image(url);
+}
+
+bool Ui::has_active_animations() const noexcept {
+    return impl_->renderer.has_active_animations();
+}
+
 // ── Update scheduling ───────────────────────────────────────────────
 
 bool Ui::needs_update() const {
@@ -442590,6 +442618,16 @@ void register_platform_font_aliases(NVGcontext* vg) {
 class NanoVGPainter final : public Painter {
 public:
     explicit NanoVGPainter(NVGcontext* vg) : vg_(vg) {}
+    ~NanoVGPainter() override {
+        for (auto& Pair : external_images_) {
+            nvgDeleteImage(vg_, Pair.second.nvg_id);
+            sg_destroy_image(Pair.second.image);
+        }
+        for (auto& Pair : retired_external_images_) {
+            nvgDeleteImage(vg_, Pair.second.nvg_id);
+            sg_destroy_image(Pair.second.image);
+        }
+    }
 
     void begin_frame(int width, int height, float dpi_scale) override {
         width_  = width;
@@ -443991,12 +444029,82 @@ public:
 
     std::uint32_t load_image(std::string_view url) override {
         const std::string key(url);
+        if (key.rfind("nativeweb-image://", 0) == 0) {
+            const auto external = external_images_.find(key);
+            return external == external_images_.end() ? 0u : static_cast<std::uint32_t>(external->second.nvg_id);
+        }
         if (auto it = image_cache_.find(key); it != image_cache_.end())
             return static_cast<std::uint32_t>(it->second);
         const int img = nvgCreateImage(vg_, key.c_str(), 0);
         if (img <= 0) return 0;
         image_cache_[key] = img;
         return static_cast<std::uint32_t>(img);
+    }
+
+    bool register_external_image(std::string_view url, void* texture, int width, int height) {
+#if defined(SOKOL_D3D11)
+        if (!vg_ || !texture || width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+            url.rfind("nativeweb-image://", 0) != 0) return false;
+        const std::string key(url);
+        if (external_images_.contains(key) || retired_external_images_.contains(key)) return false;
+        auto* Texture = static_cast<ID3D11Texture2D*>(texture);
+        D3D11_TEXTURE2D_DESC TextureDesc{};
+        Texture->GetDesc(&TextureDesc);
+        if (TextureDesc.Width != static_cast<UINT>(width) || TextureDesc.Height != static_cast<UINT>(height) ||
+            TextureDesc.MipLevels != 1 || TextureDesc.ArraySize != 1 || TextureDesc.SampleDesc.Count != 1 ||
+            (TextureDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+             TextureDesc.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS)) return false;
+        const sg_desc ActiveDesc = sg_query_desc();
+        if (!ActiveDesc.environment.d3d11.device) return false;
+        ID3D11Device* TextureDevice = nullptr;
+        Texture->GetDevice(&TextureDevice);
+        const bool bSameDevice = TextureDevice == ActiveDesc.environment.d3d11.device;
+        if (TextureDevice) TextureDevice->Release();
+        if (!bSameDevice) return false;
+
+        sg_image_desc ImageDesc{};
+        ImageDesc.type = SG_IMAGETYPE_2D;
+        ImageDesc.width = width;
+        ImageDesc.height = height;
+        ImageDesc.num_mipmaps = 1;
+        ImageDesc.num_slices = 1;
+        ImageDesc.sample_count = 1;
+        ImageDesc.pixel_format = SG_PIXELFORMAT_RGBA8;
+        ImageDesc.d3d11_texture = texture;
+        sg_image Image = sg_make_image(&ImageDesc);
+        if (Image.id == SG_INVALID_ID) return false;
+        sg_sampler Sampler{};
+        const int NvgId = nvsgCreateImageFromHandle(vg_, Image, Sampler, width, height, NVG_IMAGE_NODELETE);
+        if (NvgId <= 0) {
+            sg_destroy_image(Image);
+            return false;
+        }
+        external_images_.emplace(key, FExternalImage{Image, NvgId});
+        return true;
+#else
+        (void)url; (void)texture; (void)width; (void)height;
+        return false;
+#endif
+    }
+
+    bool unregister_external_image(std::string_view url) {
+        const std::string key(url);
+        auto It = external_images_.find(key);
+        if (It == external_images_.end()) return false;
+        retired_external_images_.emplace(key, It->second);
+        external_images_.erase(It);
+        image_cache_.erase(key);
+        return true;
+    }
+
+    bool destroy_retired_external_image(std::string_view url) {
+        const std::string key(url);
+        auto It = retired_external_images_.find(key);
+        if (It == retired_external_images_.end()) return false;
+        nvgDeleteImage(vg_, It->second.nvg_id);
+        sg_destroy_image(It->second.image);
+        retired_external_images_.erase(It);
+        return true;
     }
 
     Size image_size(std::uint32_t image) override {
@@ -444386,6 +444494,9 @@ private:
     }
 
     NVGcontext*                                  vg_{nullptr};
+    struct FExternalImage { sg_image image{}; int nvg_id{0}; };
+    std::unordered_map<std::string, FExternalImage> external_images_;
+    std::unordered_map<std::string, FExternalImage> retired_external_images_;
     int                                          width_{0};
     int                                          height_{0};
     int                                          default_face_{-1};
@@ -444410,7 +444521,7 @@ private:
 
 namespace detail {
 
-std::unique_ptr<Painter> make_nanovg_painter(NVGcontext* vg) {
+std::unique_ptr<NanoVGPainter> make_nanovg_painter(NVGcontext* vg) {
     auto painter = std::make_unique<NanoVGPainter>(vg);
     // Pick up whichever faces register_default_font installed.
     auto find = [&](const char* a, const char* b) {
@@ -444835,12 +444946,13 @@ struct RendererImpl {
 
 #if !defined(AFFINEUI_STUB_BUILD)
     NVGcontext*              vg{nullptr};
-    std::unique_ptr<Painter> painter;
+    std::unique_ptr<NanoVGPainter> painter;
     int                      last_w{-1};
     int                      last_h{-1};
     float                    last_dpi{1.0f};
     bool                     first_frame{true};
     bool                     owns_sg{false};  // we called sg_setup (embedded)
+    std::unique_ptr<_sg_state_t> sokol_context;
     // Default swapchain/composite color format. The offscreen root composite is
     // a texture, so the GL family must default to RGBA8 (see AFFINEUI_GL_FAMILY).
     // Metal/D3D11 keep their native BGRA8 swapchain format.
@@ -444898,6 +445010,58 @@ struct RendererImpl {
 // link dependency on the affineui runtime — even in code that only dispatches
 // through a `Painter&`. See the header for the full story (it broke the
 // photoedit raster core on GCC).
+#if !defined(AFFINEUI_STUB_BUILD)
+namespace detail {
+thread_local RendererImpl* GActiveSokolRenderer = nullptr;
+thread_local int GSokolRendererDepth = 0;
+thread_local std::unique_ptr<_sg_state_t> GPreviousSokolContext;
+
+class FScopedSokolRendererContext final {
+public:
+    explicit FScopedSokolRendererContext(RendererImpl& InOwner, bool bUseOwnerContext = true) : Owner(InOwner) {
+        if (!bUseOwnerContext) { bValid = true; bPassthrough = true; return; }
+        if (GActiveSokolRenderer == &Owner) {
+            ++GSokolRendererDepth;
+            bNested = true;
+            bValid = true;
+            return;
+        }
+        if (GActiveSokolRenderer != nullptr) return;
+        if (!Owner.sokol_context) Owner.sokol_context = std::make_unique<_sg_state_t>();
+        if (!GPreviousSokolContext) GPreviousSokolContext = std::make_unique<_sg_state_t>();
+        std::memcpy(GPreviousSokolContext.get(), &_sg, sizeof(_sg_state_t));
+        std::memcpy(&_sg, Owner.sokol_context.get(), sizeof(_sg_state_t));
+        std::memcpy(Owner.sokol_context.get(), GPreviousSokolContext.get(), sizeof(_sg_state_t));
+        GActiveSokolRenderer = &Owner;
+        GSokolRendererDepth = 1;
+        bValid = true;
+    }
+
+    ~FScopedSokolRendererContext() {
+        if (!bValid) return;
+        if (bPassthrough) return;
+        if (bNested) {
+            --GSokolRendererDepth;
+            return;
+        }
+        std::memcpy(GPreviousSokolContext.get(), &_sg, sizeof(_sg_state_t));
+        std::memcpy(&_sg, Owner.sokol_context.get(), sizeof(_sg_state_t));
+        std::memcpy(Owner.sokol_context.get(), GPreviousSokolContext.get(), sizeof(_sg_state_t));
+        GSokolRendererDepth = 0;
+        GActiveSokolRenderer = nullptr;
+    }
+
+    explicit operator bool() const { return bValid; }
+
+private:
+    RendererImpl& Owner;
+    bool bValid{false};
+    bool bNested{false};
+    bool bPassthrough{false};
+};
+} // namespace detail
+#endif
+
 Painter::~Painter() = default;
 
 void Painter::draw_image(const ImageHandle& image,
@@ -444982,6 +445146,11 @@ void Renderer::shutdown() {
     impl_->images->shutdown();
     impl_->ready = false;
 }
+bool Renderer::register_external_image_d3d11(std::string_view, void*, int, int) { return false; }
+bool Renderer::unregister_external_image(std::string_view) { return false; }
+bool Renderer::destroy_retired_external_image(std::string_view) { return false; }
+bool Renderer::has_active_animations() const noexcept { return false; }
+
 void Renderer::render(Document&, int, int, float) {}
 void Renderer::draw_debug_overlay(std::string_view,
                                   std::span<const float>,
@@ -445824,6 +445993,8 @@ void composite_root_layer(detail::RendererImpl& impl,
 
 void Renderer::init_embedded(const GpuContext& gpu, const Allocator* allocator) {
     if (impl_->ready) return;
+    detail::FScopedSokolRendererContext SokolContext(*impl_);
+    if (!SokolContext) return;
 
     if (gpu.backend != compiled_backend()) {
         detail::log_msg(LogLevel::error,
@@ -445872,6 +446043,8 @@ void Renderer::init_embedded(const GpuContext& gpu, const Allocator* allocator) 
 }
 
 void Renderer::render_to(Document& doc, const FrameTarget& t) {
+    detail::FScopedSokolRendererContext SokolContext(*impl_, impl_->owns_sg);
+    if (!SokolContext) return;
     if (!impl_->ready) {
         // In embedded mode init_embedded() usually created the sokol_gfx
         // context. The standalone window adapters also use FrameTarget now,
@@ -446092,6 +446265,8 @@ void Renderer::render_to(Document& doc, const FrameTarget& t) {
 }
 
 void Renderer::shutdown() {
+    detail::FScopedSokolRendererContext SokolContext(*impl_, impl_->owns_sg);
+    if (!SokolContext) return;
     impl_->images->shutdown();
     if (!impl_->ready && !impl_->owns_sg) return;
     impl_->painter.reset();
@@ -446106,6 +446281,36 @@ void Renderer::shutdown() {
         sg_shutdown();
         impl_->owns_sg = false;
     }
+}
+
+bool Renderer::register_external_image_d3d11(std::string_view url, void* texture, int width, int height) {
+    detail::FScopedSokolRendererContext SokolContext(*impl_, impl_->owns_sg);
+    if (!SokolContext) return false;
+    if (!impl_->ready || !impl_->painter) return false;
+    if (!impl_->painter->register_external_image(url, texture, width, height)) return false;
+    impl_->cached_display_list_valid = false;
+    impl_->root_layer.valid = false;
+    return true;
+}
+
+bool Renderer::unregister_external_image(std::string_view url) {
+    detail::FScopedSokolRendererContext SokolContext(*impl_, impl_->owns_sg);
+    if (!SokolContext) return false;
+    if (!impl_->ready || !impl_->painter) return false;
+    if (!impl_->painter->unregister_external_image(url)) return false;
+    impl_->cached_display_list_valid = false;
+    impl_->root_layer.valid = false;
+    return true;
+}
+
+bool Renderer::destroy_retired_external_image(std::string_view url) {
+    detail::FScopedSokolRendererContext SokolContext(*impl_, impl_->owns_sg);
+    if (!SokolContext) return false;
+    return impl_->painter && impl_->painter->destroy_retired_external_image(url);
+}
+
+bool Renderer::has_active_animations() const noexcept {
+    return impl_->stats.animations_active;
 }
 
 void Renderer::render(Document& doc, int fb_w, int fb_h, float dpi_scale) {
@@ -447702,6 +447907,27 @@ affineui_ui* affineui_ui_create(void) {
 
 void affineui_ui_destroy(affineui_ui* ui) {
     delete reinterpret_cast<affineui::Ui*>(ui);
+}
+
+int affineui_ui_register_external_image_d3d11(affineui_ui* ui, const char* url,
+                                               void* texture, int width, int height) {
+    if (!ui || !url || !texture) return 0;
+    return reinterpret_cast<affineui::Ui*>(ui)->register_external_image_d3d11(url, texture, width, height) ? 1 : 0;
+}
+
+int affineui_ui_unregister_external_image(affineui_ui* ui, const char* url) {
+    if (!ui || !url) return 0;
+    return reinterpret_cast<affineui::Ui*>(ui)->unregister_external_image(url) ? 1 : 0;
+}
+
+int affineui_ui_destroy_retired_external_image(affineui_ui* ui, const char* url) {
+    if (!ui || !url) return 0;
+    return reinterpret_cast<affineui::Ui*>(ui)->destroy_retired_external_image(url) ? 1 : 0;
+}
+
+int affineui_ui_has_active_animations(const affineui_ui* ui) {
+    if (!ui) return 0;
+    return reinterpret_cast<const affineui::Ui*>(ui)->has_active_animations() ? 1 : 0;
 }
 
 void affineui_ui_init(affineui_ui* ui, const affineui_init_desc* desc) {

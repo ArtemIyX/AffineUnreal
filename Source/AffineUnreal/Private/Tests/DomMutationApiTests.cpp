@@ -84,4 +84,22 @@ bool FAffineUiDomMutationStylesheetTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAffineUiExternalImageContractTest,
+	"AffineUI.EmbeddedDom.ExternalImageContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAffineUiExternalImageContractTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	affineui_ui* Ui = affineui_ui_create();
+	if (!TestNotNull(TEXT("AffineUI instance is created"), Ui)) return false;
+	TestFalse(TEXT("external image registration is rejected before GPU initialization"),
+		affineui_ui_register_external_image_d3d11(Ui, "nativeweb-image://1/1", reinterpret_cast<void*>(1), 1, 1) != 0);
+	TestFalse(TEXT("unregistered external URLs cannot be removed"),
+		affineui_ui_unregister_external_image(Ui, "nativeweb-image://1/1") != 0);
+	TestFalse(TEXT("new UI has no active animation"), affineui_ui_has_active_animations(Ui) != 0);
+	affineui_ui_destroy(Ui);
+	return true;
+}
+
 #endif
