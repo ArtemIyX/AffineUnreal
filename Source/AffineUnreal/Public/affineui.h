@@ -3443,6 +3443,8 @@ public:
 
     /// Current document size after the last layout pass.
     Size content_size() const;
+    /// Invalidate intrinsic image measurements and retained paint after host image changes.
+    void invalidate_external_images();
 
     /// Mutate a live DOM attribute on the element with `id`.
     /// Returns true only when the attribute value actually changed. A
@@ -6951,6 +6953,10 @@ public:
     /// clear_color when target.clear is set), draws, then ends + commits.
     /// Does not present. Requires a prior init_embedded().
     void render_to(Document& doc, const FrameTarget& target);
+    bool register_external_image_d3d11(std::string_view url, void* texture, int width, int height);
+    bool unregister_external_image(std::string_view url);
+    bool destroy_retired_external_image(std::string_view url);
+    bool has_active_animations() const noexcept;
 
     /// Release all GPU resources. Must be called while the graphics
     /// context that created them is still current — usually right
@@ -7403,6 +7409,10 @@ public:
     bool set_node_text(DomHandle node, std::string_view value);
     bool set_node_attribute(DomHandle node, std::string_view name,
                             std::string_view value, bool remove = false);
+    bool register_external_image_d3d11(std::string_view url, void* texture, int width, int height);
+    bool unregister_external_image(std::string_view url);
+    bool destroy_retired_external_image(std::string_view url);
+    bool has_active_animations() const noexcept;
     void begin_node_mutations();
     void end_node_mutations();
 
@@ -8467,6 +8477,11 @@ typedef void (*affineui_user_free_fn)(void* user);
 // ── Lifecycle ────────────────────────────────────────────────────────
 AFFINEUI_C_API affineui_ui* affineui_ui_create(void);
 AFFINEUI_C_API void         affineui_ui_destroy(affineui_ui* ui);
+AFFINEUI_C_API int affineui_ui_register_external_image_d3d11(affineui_ui* ui, const char* url,
+    void* texture, int width, int height);
+AFFINEUI_C_API int affineui_ui_unregister_external_image(affineui_ui* ui, const char* url);
+AFFINEUI_C_API int affineui_ui_destroy_retired_external_image(affineui_ui* ui, const char* url);
+AFFINEUI_C_API int affineui_ui_has_active_animations(const affineui_ui* ui);
 
 // Initialize for embedded mode against host graphics objects.
 AFFINEUI_C_API void affineui_ui_init(affineui_ui* ui, const affineui_init_desc* desc);
